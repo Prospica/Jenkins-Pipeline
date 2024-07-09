@@ -1,0 +1,134 @@
+pipeline {
+    agent any
+environment {
+        gitlabCredsDC1 = credentials('gitlab-dc1')
+        gitlabCredsDC2 = credentials('gitlab-dc2')
+        gitlabCredsDev = credentials('gitlab-dev')
+        nexusCredsDC1 = credentials('nexus-dc1')
+        nexusCredsDC2 = credentials('nexus-dc2')
+        BRANCH_REPO = "<branch>"
+        BRANCH_MANIFEST = "<branch>"
+        VER = "<branch>"
+        APP_NAME = "<app-name>"
+    }
+    stages {
+        stage('Git Pull Dev') {
+            steps {
+                sh'''
+                    rm -rf $APP_NAME
+                    git clone https://$gitlabCredsDev_USR:$gitlabCredsDev_PSW@<gitlab-url>/$APP_NAME.git
+                    cd $APP_NAME
+                    git fetch
+                    git switch $BRANCH_REPO
+                '''
+            }
+        }
+        stage('Git Push to DC 1') {
+            steps {
+                sh'''
+                    cd $APP_NAME
+                    git remote set-url origin https://$gitlabCredsDC1_USR:$gitlabCredsDC1_PSW@<gitlab-url>/$APP_NAME.git
+                    git push --force -u origin $BRANCH_REPO
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    git push --force origin tag $TAG
+                '''
+            }
+        }
+        stage('Git Push to DC 2') {
+            steps {
+                sh'''
+                    cd $APP_NAME
+                    git remote set-url origin https://$gitlabCredsDC2_USR:$gitlabCredsDC2_PSW@<gitlab-url>/$APP_NAME.git
+                    git push --force -u origin $BRANCH_REPO
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    git push --force origin tag $TAG
+                '''
+            }
+        }
+        stage('Docker Pull Required Image from Nexus for Dockerfile'){
+            steps{
+                sh'''
+                    docker pull <nexus-url:port>/<image-name>
+                '''
+            }
+        }
+        stage('Docker Build & Push Image to Nexus Prod DC 1'){
+            steps{
+                sh'''
+                    cd $APP_NAME
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    docker build -t <nexus-url:port>/<image-name>/$APP_NAME:$TAG .
+                    docker login --username=$nexusCredsDC1_USR --password=$nexusCredsDC1_PSW <nexus-url:port>
+                    docker push <nexus-url:port>/<image-name>/$APP_NAME:$TAG
+                '''
+            }
+        }
+        stage('Docker Tag & Push Image to Nexus Prod DC 2'){
+            steps{
+                sh'''
+                    cd $APP_NAME
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    docker tag <nexus-url:port>/<image-name>/$APP_NAME:$TAG <nexus-url:port>/<image-name>/$APP_NAME:$TAG
+                    docker login --username=$nexusCredsDC2_USR --password=$nexusCredsDC2_PSW <nexus-url:port>
+                    docker push <nexus-url:port>/<image-name>/$APP_NAME:$TAG
+                '''
+            }
+        }
+        stage('Update Manifest DC 1'){
+            steps{
+                sh '''
+                    cd $APP_NAME
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    cd ..
+                    rm -rf <manifest-folder-name>
+                    git clone https://$gitlabCredsDC1_USR:$gitlabCredsDC1_PSW@<gitlab-url>/<project-name>.git
+                    cd <manifest-folder-name>
+                    git checkout $BRANCH_MANIFEST
+                    cd $APP_NAME
+
+                    sed -i "s/$VER-.*/$TAG/" deployment.yaml
+                
+                    git add .
+                    git commit -m "update image tag" || true
+                    git push -u origin $BRANCH_MANIFEST || true
+                '''
+            }
+        }
+        stage('Update Manifest DC 2'){
+            steps{
+                sh '''
+                    cd $APP_NAME
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    cd ..
+                    rm -rf <manifest-folder-name>
+                    git clone https://$gitlabCredsDC2_USR:$gitlabCredsDC2_PSW@<gitlab-url>/<project-name>.git
+                    cd <manifest-folder-name>
+                    git checkout $BRANCH_MANIFEST
+                    cd $APP_NAME
+
+                    sed -i "s/$VER-.*/$TAG/" deployment.yaml
+                
+                    git add .
+                    git commit -m "update image tag" || true
+                    git push -u origin $BRANCH_MANIFEST || true
+                '''
+            }
+        }
+    }    
+post{
+        success{
+            echo "Pipeline Success"
+        }
+        failure{
+            echo "Something is wrong, pipeline failed..."
+        }
+        aborted{
+            echo "Pipeline Aborted..."
+        }
+        always{
+            sh'''
+                echo "Done"
+            '''
+        }
+    }
+}
