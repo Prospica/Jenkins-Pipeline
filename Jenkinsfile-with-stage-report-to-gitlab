@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+environment {
+        gitlabCreds = credentials('jenkins-gitlab')
+        sonarqubeCreds = credentials('jenkins-sonarqube')
+        nexusCreds = credentials('argocd-nexus')
+        BRANCH_REPO = "<branch>"
+        BRANCH_MANIFEST = "<branch>"
+        VER = "<branch>"
+        APP_NAME = "<app-name>"
+    }
+    stages {
+        stage('Git Pull') {
+            steps {
+                gitlabCommitStatus(name: 'Git Pull') {
+                    sh'''
+                        git config --global http.sslVerify "false"
+                    '''
+                    checkout([$class: 'GitSCM', branches: [[name: env.BRANCH_REPO]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout', deleteUntrackedNestedRepositories: true]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'jenkins-gitlab', url: '<gitlab-url>']]])
+                }
+                
+            }
+        }
+        stage('Sonarqube Analysis'){
+             steps{
+                    gitlabCommitStatus(name: 'Sonarqube Analysis') {
+                        withSonarQubeEnv('Sonarqube'){
+                            sh'''
+                                /opt/sonar-scanner/bin/sonar-scanner -Dsonar.projectName="<project-name>" -Dsonar.projectKey="<project-key>" -Dsonar.sources=src/
+                            '''  
+                        }
+                    }
+            }
+        }
+        stage('Quality Gate'){
+             steps{
+                    gitlabCommitStatus(name: 'Quality Gate') {
+                        waitForQualityGate abortPipeline: false
+                    }
+            }
+        }
+        stage('Docker Pull Required Image from Nexus for Dockerfile'){
+            steps{
+                gitlabCommitStatus(name: 'SAST with Sonarqube') {
+                    sh'''
+                        docker pull <nexus-url:port>/<image-name>
+                    '''
+                }
+            }
+        }
+        stage('Docker Build and Push Image to Nexus'){
+            steps{
+                gitlabCommitStatus(name: 'Docker Build and Push Image to Nexus') {
+                    sh'''
+                        TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                        docker build -t <nexus-url:port>/$APP_NAME/app:$TAG .
+                        docker images
+                        docker login --username=$nexusCreds_USR --password=$nexusCreds_PSW <nexus-url:port>
+                        docker push <nexus-url:port>/$APP_NAME/app:$TAG
+                    '''
+                }
+            }
+        }
+        stage('Update Manifest'){
+            steps{
+                gitlabCommitStatus(name: 'Update Manifest') {
+                updateGitlabCommitStatus name: 'Update Manifest', state: 'running'
+                sh '''
+                    TAG=`git tag -l $VER'*' | sort -V | tail -n 1`
+                    rm -rf <folder-manifest>
+                    git clone https://$gitlabCreds_USR:$gitlabCreds_PSW@<gitlab-url>
+                    cd <folder-manifest>
+                    cd $APP_NAME
+                    git checkout $BRANCH_MANIFEST
+
+                    sed -i "s/$VER-.*/$TAG/" deployment.yaml
+                
+                    git add .
+                    git commit -m "update image tag"
+                    git push -u origin $BRANCH_MANIFEST
+                '''
+                }
+            }
+        }
+    }
+    post{
+        success{
+            echo "Pipeline Success"
+        }
+        failure{
+            echo "Something is wrong, pipeline failed..."
+        }
+        aborted{
+            echo "Pipeline Aborted..."
+        }
+        always{
+            sh'''
+                docker system prune --force
+            '''
+        }
+    }
+}
